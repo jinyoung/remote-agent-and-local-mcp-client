@@ -106,47 +106,55 @@ async function main() {
             }
         };
 
-        eventSource.onmessage = async (event: MessageEvent) => {
-            if (event.type === "command") {
-                try {
-                    const data = JSON.parse(event.data) as CommandData;
-                    console.log("Command event received:", data);
+        // 명시적으로 'command' 이벤트를 리스닝합니다
+        (eventSource as any).addEventListener("command", async (event: MessageEvent) => {
+            try {
+                console.log("Command event received with data:", event.data);
+                const data = JSON.parse(event.data) as CommandData;
+                console.log("Command event parsed:", data);
 
-                    // Execute the command using appropriate tool
-                    const exactTool = tools.find(t => t.name === data.tool);
-                    const partialMatchTool = exactTool || tools.find(t => 
-                        t.name.includes('playwright') && 
-                        (t.name.includes('navigate') || t.name.includes('browser'))
-                    );
-                    const tool = exactTool || partialMatchTool;
+                // Execute the command using appropriate tool
+                const exactTool = tools.find(t => t.name === data.tool);
+                const partialMatchTool = exactTool || tools.find(t => 
+                    t.name.includes('playwright') && 
+                    (t.name.includes('navigate') || t.name.includes('browser'))
+                );
+                const tool = exactTool || partialMatchTool;
 
-                    if (tool) {
-                        console.log(`Found tool: ${tool.name}, executing with params:`, data.params);
-                        const result = await tool.invoke(data.params);
-                        console.log(`Tool execution result:`, result);
-                        
-                        // Send result back to cloud agent
-                        const response = await fetch(`${CLOUD_HOST}/result/${CLIENT_ID}`, {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                            },
-                            body: JSON.stringify({
-                                commandId: data.id,
-                                result: result
-                            }),
-                        });
-                        console.log("Result sent:", await response.json());
-                    } else {
-                        console.error(`Tool ${data.tool} not found. Available tools:`, tools.map(t => t.name));
-                    }
-                } catch (error) {
-                    console.error("Error processing command event:", error);
+                if (tool) {
+                    console.log(`Found tool: ${tool.name}, executing with params:`, data.params);
+                    const result = await tool.invoke(data.params);
+                    console.log(`Tool execution result:`, result);
+                    
+                    // Send result back to cloud agent
+                    const response = await fetch(`${CLOUD_HOST}/result/${CLIENT_ID}`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            commandId: data.id,
+                            result: result
+                        }),
+                    });
+                    console.log("Result sent:", await response.json());
+                } else {
+                    console.error(`Tool ${data.tool} not found. Available tools:`, tools.map(t => t.name));
                 }
-            } else if (event.type === "heartbeat") {
-                console.log("Heartbeat received:", event.data);
+            } catch (error) {
+                console.error("Error processing command event:", error);
             }
+        });
+
+        // 일반적인 메시지 처리 (이벤트 타입이 없는 경우)
+        eventSource.onmessage = (event: MessageEvent) => {
+            console.log("Generic message received:", event.data);
         };
+
+        // 하트비트 이벤트 처리
+        (eventSource as any).addEventListener("heartbeat", (event: MessageEvent) => {
+            console.log("Heartbeat received:", event.data);
+        });
 
         eventSource.onerror = (error: Event) => {
             console.error("SSE connection error:", error);

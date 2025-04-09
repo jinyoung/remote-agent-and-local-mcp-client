@@ -1,9 +1,9 @@
 import uuid
 import asyncio
 import inspect
-from typing import Any, Dict, List, Optional, Callable, Type, get_type_hints, ClassVar
+from typing import Any, Dict, List, Optional, Callable, Type, get_type_hints, ClassVar, Union
 from pydantic import BaseModel, Field, create_model
-from langchain.tools import BaseTool, Tool
+from langchain.tools import BaseTool, Tool, StructuredTool
 import httpx
     
 class MCPClient:
@@ -52,6 +52,34 @@ class MCPToolInput(BaseModel):
     """Default input model for MCP tools."""
     pass
 
+# 비동기 함수를 동기적으로 실행하는 래퍼 함수
+def create_sync_wrapper(coro_func, is_single_param=False):
+    """Create a synchronous wrapper for an asynchronous function"""
+    if is_single_param:
+        def wrapper(arg):
+            """Wrapper for single parameter async function"""
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                # 이벤트 루프가 없으면 새로 생성
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            return loop.run_until_complete(coro_func(arg))
+        return wrapper
+    else:
+        def wrapper(**kwargs):
+            """Wrapper for multi parameter async function"""
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                # 이벤트 루프가 없으면 새로 생성
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+            return loop.run_until_complete(coro_func(**kwargs))
+        return wrapper
+
 # Instead of subclassing BaseTool, we'll use Tool factory function to avoid Pydantic issues
 async def create_mcp_tool_function(
     client: MCPClient,
@@ -59,24 +87,58 @@ async def create_mcp_tool_function(
     display_name: str,
     description: str,
     args_schema: Type[BaseModel],
-) -> Callable:
+) -> Dict[str, Any]:
     """Create an MCP tool function that can be used with the Tool class."""
     
-    async def _func(**kwargs):
-        """The actual function that will be executed."""
-        try:
-            if not client:
-                return {"error": "MCP client not provided"}
-            result = await client.send_command(tool_name, kwargs)
-            return result
-        except Exception as e:
-            return {"error": str(e)}
+    # Check if schema has only one parameter - for string/single input tools
+    schema_fields = [field for field in args_schema.__fields__] if hasattr(args_schema, '__fields__') else []
+    is_single_param = len(schema_fields) == 1
     
-    # Set proper function name and docstring
-    _func.__name__ = display_name
-    _func.__doc__ = description
-    
-    return _func
+    if is_single_param:
+        # For tools with a single input parameter (string-like)
+        param_name = schema_fields[0]
+        
+        async def _single_func(arg_value: str) -> Dict[str, Any]:
+            """Function for tools with a single argument."""
+            try:
+                if not client:
+                    return {"error": "MCP client not provided"}
+                # Create params dictionary with the single parameter
+                params = {param_name: arg_value}
+                result = await client.send_command(tool_name, params)
+                return result
+            except Exception as e:
+                return {"error": str(e)}
+        
+        # Set proper function name and docstring
+        _single_func.__name__ = display_name
+        _single_func.__doc__ = description
+        
+        return {
+            "func": _single_func,
+            "is_single_param": True
+        }
+    else:
+        # For tools with multiple parameters or empty parameters
+        async def _multi_func(**kwargs) -> Dict[str, Any]:
+            """Function for tools with multiple arguments."""
+            try:
+                if not client:
+                    return {"error": "MCP client not provided"}
+                # Pass kwargs directly as params
+                result = await client.send_command(tool_name, kwargs)
+                return result
+            except Exception as e:
+                return {"error": str(e)}
+        
+        # Set proper function name and docstring
+        _multi_func.__name__ = display_name
+        _multi_func.__doc__ = description
+        
+        return {
+            "func": _multi_func,
+            "is_single_param": False
+        }
 
 async def fetch_mcp_tools(client_id: str) -> List[Dict[str, Any]]:
     """Fetch tool definitions from the local MCP client."""
@@ -121,6 +183,10 @@ def create_args_schema(tool_def: Dict[str, Any]) -> Type[BaseModel]:
             
         fields[param_name] = (param_type, Field(..., description=param_def.get("description", "")))
     
+    # If no parameters, create an empty model
+    if not fields:
+        fields = {"dummy": (Optional[str], Field(None, description="Dummy field"))}
+    
     # Create a dynamic Pydantic model for the arguments
     model_name = f"{tool_def.get('display_name', 'MCPTool')}Input"
     return create_model(model_name, **fields)
@@ -135,7 +201,7 @@ async def create_mcp_tools(
     mcp_client = MCPClient(client_id=client_id, send_command_func=send_command_func)
     
     # Use provided tool definitions if available, otherwise try to fetch them
-    tool_defs = tool_definitions
+    tool_defs = tool_definitions or []
     
     tools = []
     for tool_def in tool_defs:
@@ -149,7 +215,7 @@ async def create_mcp_tools(
             description = tool_def.get("description", "")
             
             # Create the tool function
-            tool_func = await create_mcp_tool_function(
+            tool_info = await create_mcp_tool_function(
                 client=mcp_client,
                 tool_name=mcp_tool_name,
                 display_name=display_name,
@@ -157,16 +223,32 @@ async def create_mcp_tools(
                 args_schema=args_schema
             )
             
-            # Create a Tool using the factory function instead of subclassing BaseTool
-            tool = Tool(
-                name=display_name,
-                description=description,
-                func=tool_func,
-                coroutine=tool_func,
-                args_schema=args_schema
-            )
+            tool_func = tool_info["func"]
+            is_single_param = tool_info["is_single_param"]
+            
+            # 비동기 함수를 동기적으로 실행하는 래퍼 생성
+            sync_func = create_sync_wrapper(tool_func, is_single_param)
+            
+            # Create appropriate tool type based on parameters
+            if is_single_param:
+                # 단일 파라미터 도구는 일반 Tool 사용
+                tool = Tool(
+                    name=display_name,
+                    description=description,
+                    func=sync_func,  # 동기 래퍼 사용
+                    coroutine=tool_func
+                )
+            else:
+                # 다중 파라미터 도구는 StructuredTool 사용
+                tool = StructuredTool.from_function(
+                    func=sync_func,  # 동기 래퍼 사용
+                    name=display_name, 
+                    description=description,
+                    args_schema=args_schema,
+                )
                 
             tools.append(tool)
+            print(f"Created tool: {display_name} with schema: {args_schema}")
         except Exception as e:
             print(f"Error creating tool for {tool_def.get('name')}: {e}")
     
@@ -177,7 +259,7 @@ async def create_mcp_tools(
             default_schema = create_model("BrowserNavigateInput", url=(str, Field(..., description="The URL to navigate to")))
             
             # Create fallback tool function
-            fallback_func = await create_mcp_tool_function(
+            tool_info = await create_mcp_tool_function(
                 client=mcp_client,
                 tool_name="mcp__playwright__browser_navigate",
                 display_name="browser_navigate",
@@ -185,16 +267,22 @@ async def create_mcp_tools(
                 args_schema=default_schema
             )
             
+            tool_func = tool_info["func"]
+            is_single_param = tool_info["is_single_param"]
+            
+            # 비동기 함수를 동기적으로 실행하는 래퍼 생성
+            sync_func = create_sync_wrapper(tool_func, is_single_param)
+            
             # Create a Tool using the factory function
             default_tool = Tool(
                 name="browser_navigate",
                 description="Navigate to a URL",
-                func=fallback_func,
-                coroutine=fallback_func,
-                args_schema=default_schema
+                func=sync_func,  # 동기 래퍼 사용
+                coroutine=tool_func  # 비동기 함수
             )
             
             tools.append(default_tool)
+            print(f"Created fallback tool: browser_navigate")
         except Exception as e:
             print(f"Error creating fallback tool: {e}")
     
