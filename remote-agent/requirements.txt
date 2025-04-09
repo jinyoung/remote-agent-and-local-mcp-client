@@ -1,0 +1,7 @@
+fastapi==0.115.12
+uvicorn==0.34.0
+sse-starlette==2.2.1
+python-multipart==0.0.9
+typing-extensions==4.13.1
+starlette==0.46.1
+pydantic==2.11.3 
