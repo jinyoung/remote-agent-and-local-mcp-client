@@ -77,16 +77,11 @@ curl -X POST http://127.0.0.1:8000/test/send_command/test-client-1 \
 Playwright를 사용하여 브라우저를 제어하는 명령을 전송할 수 있습니다:
 
 ```bash
-# 브라우저 설치 (필요한 경우)
-curl -X POST http://127.0.0.1:8000/test/send_command/test-client-1 \
-  -H "Content-Type: application/json" \
-  -d '{"id": "install1", "tool": "mcp_playwright_browser_install", "params": {"random_string": "install"}}' \
-  -v
 
 # 웹사이트 탐색
 curl -X POST http://127.0.0.1:8000/test/send_command/test-client-1 \
   -H "Content-Type: application/json" \
-  -d '{"id": "browser1", "tool": "playwright__navigate", "params": {"url": "https://www.naver.com"}}' \
+  -d '{"id": "browser1", "tool": "mcp__playwright__browser_navigate", "params": {"url": "https://www.naver.com"}}' \
   -v
 ```
 
