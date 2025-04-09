@@ -14,6 +14,8 @@ app = FastAPI()
 # Store connected clients and their MCPClient instances
 CLIENTS: Dict[str, Set[asyncio.Queue]] = {}
 MCP_CLIENTS: Dict[str, MCPClient] = {}
+# Store tool definitions for each client
+CLIENT_TOOLS: Dict[str, List[Dict[str, Any]]] = {}
 
 async def send_command_to_client(client_id: str, command: dict):
     if client_id in CLIENTS:
@@ -53,6 +55,8 @@ async def connect_client(client_id: str):
                 del CLIENTS[client_id]
                 if client_id in MCP_CLIENTS:
                     del MCP_CLIENTS[client_id]
+                if client_id in CLIENT_TOOLS:
+                    del CLIENT_TOOLS[client_id]
             print(f"Client {client_id} disconnected")
             
     return EventSourceResponse(event_generator())
@@ -71,6 +75,21 @@ async def receive_result(client_id: str, request: Request):
     
     return {"status": "received"}
 
+@app.post("/register_tools/{client_id}")
+async def register_tools(client_id: str, request: Request):
+    """Endpoint for clients to register their available tools."""
+    data = await request.json()
+    tools = data.get("tools", [])
+    
+    if not tools:
+        return JSONResponse(status_code=400, content={"status": "error", "message": "No tools provided"})
+    
+    # Store the tools for this client
+    CLIENT_TOOLS[client_id] = tools
+    print(f"Registered {len(tools)} tools for client {client_id}")
+    
+    return {"status": "success", "message": f"Registered {len(tools)} tools for client {client_id}"}
+
 # Endpoint for agent to process user requests
 @app.post("/agent/{client_id}")
 async def agent_endpoint(client_id: str, request: Request, background_tasks: BackgroundTasks):
@@ -84,8 +103,12 @@ async def agent_endpoint(client_id: str, request: Request, background_tasks: Bac
         # Create MCPClient instance if it doesn't exist
         MCP_CLIENTS[client_id] = MCPClient(client_id=client_id, send_command_func=send_command_to_client)
     
-    # Create MCP tools
-    tools = await create_mcp_tools(client_id, send_command_func=send_command_to_client)
+    # Create MCP tools using the registered tool definitions if available
+    tools = await create_mcp_tools(
+        client_id=client_id, 
+        send_command_func=send_command_to_client,
+        tool_definitions=CLIENT_TOOLS.get(client_id, [])
+    )
     
     # Run the agent in the background to avoid blocking
     background_tasks.add_task(process_agent_request, client_id, user_input, tools)
